@@ -1,0 +1,665 @@
+{
+  "id": "microtemp000000000000000001",
+  "name": "Microprocessor Temperature Monitor",
+  "nodes": [
+    {
+      "id": "n-sched",
+      "name": "Recurring Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-trig2",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        320
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n-load",
+      "name": "Load Device State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Load Device State: restore persisted device state or seed defaults.\n// Runs identically on scheduled, manual, and reset-seeded paths.\nconst s = $getWorkflowStaticData('global');\nfunction num(v, d) { return (typeof v === 'number' && Number.isFinite(v)) ? v : d; }\nfunction bool(v, d) { return (typeof v === 'boolean') ? v : d; }\nfunction str(v, d) { return (typeof v === 'string' && v.length > 0) ? v : d; }\nconst temperature = num(s.temperature_c, 45);\nconst fanOn = bool(s.fan_on, false);\nreturn [{ json: {\n  device_id: str(s.device_id, 'cpu-01'),\n  temperature_c: temperature,\n  cpu_load_percent: num(s.cpu_load_percent, 50),\n  fan_state: fanOn ? 'ON' : 'OFF',\n  fan_speed_percent: fanOn ? 100 : 0,\n  status: str(s.status, 'NORMAL'),\n  tick: num(s.tick, 0),\n  heat_bias_c: num(s.heat_bias_c, 0),\n  timestamp: new Date().toISOString()\n} }];\n"
+      }
+    },
+    {
+      "id": "n-env",
+      "name": "Simulate Environment",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        480,
+        80
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e-note",
+              "name": "env_disturbance_armed",
+              "type": "boolean",
+              "value": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-sens",
+      "name": "Temperature Sensor",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        720,
+        80
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "sn-c",
+              "name": "sensor_c",
+              "type": "number",
+              "value": "={{ $json.temperature_c }}"
+            },
+            {
+              "id": "sn-ok",
+              "name": "sensor_ok",
+              "type": "boolean",
+              "value": true
+            }
+          ]
+        },
+        "includeOtherFields": true
+      }
+    },
+    {
+      "id": "n-apply",
+      "name": "Apply Heating & Cooling",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Apply Heating & Cooling: one deterministic physics tick.\n// Computes cpu_load_percent deterministically (tick 0 -> 50, else\n// 60 + (((tick+1) * 17) % 30)), then heat in from load+bias,\n// passive loss to ambient, active fan cooling.\nconst inp = $input.first().json;\nconst AMBIENT = 25, HEAT = 0.02, PASSIVE = 0.01, COOL = 3.0;\nconst MIN_T = -40, MAX_T = 125;\nfunction num(v, d) { return (typeof v === 'number' && Number.isFinite(v)) ? v : d; }\nconst prevTick = num(inp.tick, 0);\nconst tick = prevTick + 1;\nconst load = prevTick === 0 ? 50 : 60 + (((prevTick + 1) * 17) % 30);\nconst prevT = num(inp.temperature_c, 45);\nconst bias = num(inp.heat_bias_c, 0);\nconst fanOn = inp.fan_state === 'ON';\nlet next = prevT + (load * HEAT + bias) - (prevT - AMBIENT) * PASSIVE - (fanOn ? COOL : 0);\nif (!Number.isFinite(next)) next = prevT;\nnext = Math.min(MAX_T, Math.max(MIN_T, next));\nconst r = Math.round(next * 100) / 100;\nreturn [{ json: Object.assign({}, inp, {\n  cpu_load_percent: load, temperature_c: r, sensor_c: r, tick: tick,\n  timestamp: new Date().toISOString()\n}) }];\n\n"
+      }
+    },
+    {
+      "id": "n-save",
+      "name": "Save Device State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Save Device State: persist tick result for the next execution.\n// Disturbance override (state_override_c) is consumed here: the\n// temperature is replaced BEFORE the controller IF nodes run, so the\n// normal hysteresis chain decides the fan (no forced fan anywhere).\n// The override is cleared so it acts exactly once.\nconst inp = $input.first().json;\nconst s = $getWorkflowStaticData('global');\nfunction num(v, d) { return (typeof v === 'number' && Number.isFinite(v)) ? v : d; }\nlet temp = num(inp.temperature_c, 45);\nlet disturbed = false;\nif (typeof s.state_override_c === 'number' && Number.isFinite(s.state_override_c)) {\n  temp = Math.min(125, Math.max(-40, s.state_override_c));\n  disturbed = true;\n  delete s.state_override_c;\n}\ns.pending_temperature_c = temp;\ns.pending_disturbed = disturbed;\ns.pending_tick = num(inp.tick, 0);\ns.pending_load = num(inp.cpu_load_percent, 50);\ns.pending_bias = num(inp.heat_bias_c, 0);\ns.persisted_tick = num(inp.tick, 0);\nreturn [{ json: Object.assign({}, inp, {\n  temperature_c: temp, sensor_c: temp, disturbed: disturbed,\n  timestamp: new Date().toISOString()\n}) }];\n\n"
+      }
+    },
+    {
+      "id": "n-status",
+      "name": "Determine Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2.0,
+      "position": [
+        1440,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Determine Status: resolve status string from physics + controller context.\n// Runs after Save Device State (disturbance applied) and before Validate Sensor.\nconst inp = $input.first().json;\nfunction num(v, d) { return (typeof v === 'number' && Number.isFinite(v)) ? v : d; }\nconst temp = num(inp.temperature_c, 45);\nconst fanOn = inp.fan_state === 'ON';\nconst disturbed = inp.disturbed === true;\nlet status;\nif (temp >= 80) status = 'OVERHEAT';\nelse if (disturbed) status = 'RECOVERING';\nelse status = fanOn ? 'COOLING' : 'NORMAL';\nreturn [{ json: Object.assign({}, inp, { status: status }) }];\n"
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "v-lo",
+              "leftValue": "={{ $json.sensor_c }}",
+              "rightValue": -40,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            },
+            {
+              "id": "v-hi",
+              "leftValue": "={{ $json.sensor_c }}",
+              "rightValue": 125,
+              "operator": {
+                "type": "number",
+                "operation": "lte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n-valid",
+      "name": "Validate Sensor",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1680,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-on",
+              "leftValue": "={{ $json.temperature_c }}",
+              "rightValue": 60,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n-on",
+      "name": "Temperature Controller",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1680,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-off",
+              "leftValue": "={{ $json.temperature_c }}",
+              "rightValue": 50,
+              "operator": {
+                "type": "number",
+                "operation": "lte"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n-off",
+      "name": "Fan Hysteresis Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1920,
+        -40
+      ]
+    },
+    {
+      "id": "n-fanon",
+      "name": "Fan Actuator: ON",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1920,
+        -160
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a-on-s",
+              "name": "fan_state",
+              "type": "string",
+              "value": "ON"
+            },
+            {
+              "id": "a-on-sp",
+              "name": "fan_speed_percent",
+              "type": "number",
+              "value": 100
+            },
+            {
+              "id": "a-on-st",
+              "name": "status",
+              "type": "string",
+              "value": "COOLING"
+            }
+          ]
+        },
+        "includeOtherFields": true
+      }
+    },
+    {
+      "id": "n-fanoff",
+      "name": "Fan Actuator: OFF",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1920,
+        80
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a-off-s",
+              "name": "fan_state",
+              "type": "string",
+              "value": "OFF"
+            },
+            {
+              "id": "a-off-sp",
+              "name": "fan_speed_percent",
+              "type": "number",
+              "value": 0
+            },
+            {
+              "id": "a-off-st",
+              "name": "status",
+              "type": "string",
+              "value": "NORMAL"
+            }
+          ]
+        },
+        "includeOtherFields": true
+      }
+    },
+    {
+      "id": "n-hold",
+      "name": "Fan Actuator: HOLD",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1920,
+        300
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a-h-s",
+              "name": "fan_speed_percent",
+              "type": "number",
+              "value": "={{ $json.fan_state === \"ON\" ? 100 : 0 }}"
+            }
+          ]
+        },
+        "includeOtherFields": true
+      }
+    },
+    {
+      "id": "n-commit",
+      "name": "Commit State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        80
+      ],
+      "parameters": {
+        "jsCode": "// Commit State: persist the controller-decided result for next tick.\nconst inp = $input.first().json;\nconst s = $getWorkflowStaticData('global');\nfunction num(v, d) { return (typeof v === 'number' && Number.isFinite(v)) ? v : d; }\nfunction str(v, d) { return (typeof v === 'string' && v.length > 0) ? v : d; }\nconst fanOn = inp.fan_state === 'ON';\nlet status = str(inp.status, fanOn ? 'COOLING' : 'NORMAL');\nif (num(inp.temperature_c, 0) >= 80) status = 'OVERHEAT';\ns.device_id = 'cpu-01';\ns.temperature_c = num(inp.temperature_c, 45);\ns.cpu_load_percent = num(inp.cpu_load_percent, 50);\ns.fan_on = fanOn;\ns.status = status;\ns.tick = num(inp.tick, 0);\ns.heat_bias_c = num(inp.heat_bias_c, 0);\ns.updated_at = new Date().toISOString();\nreturn [{ json: Object.assign({}, inp, {\n  status: status, fan_speed_percent: fanOn ? 100 : 0,\n  timestamp: s.updated_at\n}) }];\n"
+      }
+    },
+    {
+      "id": "n-out",
+      "name": "Output Current State",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        2400,
+        80
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o-id",
+              "name": "device_id",
+              "type": "string",
+              "value": "={{ $json.device_id }}"
+            },
+            {
+              "id": "o-t",
+              "name": "temperature_c",
+              "type": "number",
+              "value": "={{ $json.temperature_c }}"
+            },
+            {
+              "id": "o-l",
+              "name": "cpu_load_percent",
+              "type": "number",
+              "value": "={{ $json.cpu_load_percent }}"
+            },
+            {
+              "id": "o-fs",
+              "name": "fan_state",
+              "type": "string",
+              "value": "={{ $json.fan_state }}"
+            },
+            {
+              "id": "o-fp",
+              "name": "fan_speed_percent",
+              "type": "number",
+              "value": "={{ $json.fan_speed_percent }}"
+            },
+            {
+              "id": "o-s",
+              "name": "status",
+              "type": "string",
+              "value": "={{ $json.status }}"
+            },
+            {
+              "id": "o-k",
+              "name": "tick",
+              "type": "number",
+              "value": "={{ $json.tick }}"
+            },
+            {
+              "id": "o-ts",
+              "name": "timestamp",
+              "type": "string",
+              "value": "={{ $json.timestamp }}"
+            }
+          ]
+        },
+        "includeOtherFields": false
+      }
+    },
+    {
+      "id": "n-fault",
+      "name": "Fault Output",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1680,
+        420
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "fl-s",
+              "name": "status",
+              "type": "string",
+              "value": "FAULT_SENSOR"
+            },
+            {
+              "id": "fl-f",
+              "name": "fan_state",
+              "type": "string",
+              "value": "ON"
+            },
+            {
+              "id": "fl-fp",
+              "name": "fan_speed_percent",
+              "type": "number",
+              "value": 100
+            },
+            {
+              "id": "fl-t",
+              "name": "tick",
+              "type": "number",
+              "value": "={{ $json.tick }}"
+            },
+            {
+              "id": "fl-tp",
+              "name": "temperature_c",
+              "type": "number",
+              "value": "={{ $json.sensor_c }}"
+            }
+          ]
+        },
+        "includeOtherFields": false
+      }
+    }
+  ],
+  "connections": {
+    "Recurring Trigger": {
+      "main": [
+        [
+          {
+            "node": "Load Device State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Load Device State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Device State": {
+      "main": [
+        [
+          {
+            "node": "Simulate Environment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simulate Environment": {
+      "main": [
+        [
+          {
+            "node": "Temperature Sensor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Temperature Sensor": {
+      "main": [
+        [
+          {
+            "node": "Apply Heating & Cooling",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Heating & Cooling": {
+      "main": [
+        [
+          {
+            "node": "Save Device State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Device State": {
+      "main": [
+        [
+          {
+            "node": "Determine Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Determine Status": {
+      "main": [
+        [
+          {
+            "node": "Validate Sensor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Sensor": {
+      "main": [
+        [
+          {
+            "node": "Temperature Controller",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fault Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Temperature Controller": {
+      "main": [
+        [
+          {
+            "node": "Fan Actuator: ON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fan Hysteresis Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan Hysteresis Check": {
+      "main": [
+        [
+          {
+            "node": "Fan Actuator: OFF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fan Actuator: HOLD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan Actuator: ON": {
+      "main": [
+        [
+          {
+            "node": "Commit State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan Actuator: OFF": {
+      "main": [
+        [
+          {
+            "node": "Commit State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan Actuator: HOLD": {
+      "main": [
+        [
+          {
+            "node": "Commit State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Commit State": {
+      "main": [
+        [
+          {
+            "node": "Output Current State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
