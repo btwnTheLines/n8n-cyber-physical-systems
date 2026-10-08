@@ -1,0 +1,473 @@
+{
+  "name": "Microprocessor Temperature Monitor",
+  "nodes": [
+    {
+      "id": "n-trig",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n-init",
+      "name": "Init Run",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "i-t",
+              "name": "temperature",
+              "type": "number",
+              "value": 45
+            },
+            {
+              "id": "i-f",
+              "name": "fanOn",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "id": "i-k",
+              "name": "tick",
+              "type": "number",
+              "value": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-sim",
+      "name": "Simulate Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const seed = $input.first().json;\nconst AMBIENT = 25, HEAT = 0.02, PASSIVE = 0.01, COOL = 3.0;\nconst MIN_T = -40, MAX_T = 125, ON_T = 60, OFF_T = 50, TICKS = 30;\nlet temp = typeof seed.temperature === 'number' ? seed.temperature : 45;\nlet fan = seed.fanOn === true;\nconst out = [];\nfor (let tick = 1; tick <= TICKS; tick++) {\n  const load = 60 + ((tick * 17) % 30);\n  let next = temp + load * HEAT - (temp - AMBIENT) * PASSIVE - (fan ? COOL : 0);\n  if (!Number.isFinite(next)) next = temp;\n  next = Math.min(MAX_T, Math.max(MIN_T, next));\n  if (next >= ON_T) fan = true; else if (next <= OFF_T) fan = false;\n  const r = Math.round(next * 100) / 100;\n  out.push({ json: { tick, load, temperature: r, sensorTemp: r, fanOn: fan,\n    status: fan ? 'COOLING' : 'NORMAL', fanOnThreshold: ON_T, fanOffThreshold: OFF_T } });\n  temp = next;\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "n-valid",
+      "name": "Sensor Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "options": {},
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "v-lo",
+              "leftValue": "={{ $json.sensorTemp }}",
+              "rightValue": -40,
+              "operator": {
+                "type": "number",
+                "operation": "largerEqual"
+              }
+            },
+            {
+              "id": "v-hi",
+              "leftValue": "={{ $json.sensorTemp }}",
+              "rightValue": 125,
+              "operator": {
+                "type": "number",
+                "operation": "smallerEqual"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-on",
+      "name": "Temp >= 60?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        880,
+        -80
+      ],
+      "parameters": {
+        "options": {},
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-on",
+              "leftValue": "={{ $json.temperature }}",
+              "rightValue": 60,
+              "operator": {
+                "type": "number",
+                "operation": "largerEqual"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-off",
+      "name": "Temp <= 50?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "options": {},
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-off",
+              "leftValue": "={{ $json.temperature }}",
+              "rightValue": 50,
+              "operator": {
+                "type": "number",
+                "operation": "smallerEqual"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-fanon",
+      "name": "Confirm Fan ON",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1100,
+        -240
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o1",
+              "name": "controllerDecision",
+              "type": "string",
+              "value": "ON"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-fanoff",
+      "name": "Confirm Fan OFF",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1320,
+        -80
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o2",
+              "name": "controllerDecision",
+              "type": "string",
+              "value": "OFF"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-hold",
+      "name": "Confirm Fan HOLD",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1320,
+        160
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o3",
+              "name": "controllerDecision",
+              "type": "string",
+              "value": "HOLD"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-out",
+      "name": "Output State",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        1540,
+        -40
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f-t",
+              "name": "tick",
+              "type": "number",
+              "value": "={{ $json.tick }}"
+            },
+            {
+              "id": "f-l",
+              "name": "load",
+              "type": "number",
+              "value": "={{ $json.load }}"
+            },
+            {
+              "id": "f-tp",
+              "name": "temperature",
+              "type": "number",
+              "value": "={{ $json.temperature }}"
+            },
+            {
+              "id": "f-f",
+              "name": "fanOn",
+              "type": "boolean",
+              "value": "={{ $json.fanOn }}"
+            },
+            {
+              "id": "f-s",
+              "name": "status",
+              "type": "string",
+              "value": "={{ $json.status }}"
+            },
+            {
+              "id": "f-d",
+              "name": "controllerDecision",
+              "type": "string",
+              "value": "={{ $json.controllerDecision }}"
+            },
+            {
+              "id": "f-hi",
+              "name": "fanOnThreshold",
+              "type": "number",
+              "value": "={{ $json.fanOnThreshold }}"
+            },
+            {
+              "id": "f-lo",
+              "name": "fanOffThreshold",
+              "type": "number",
+              "value": "={{ $json.fanOffThreshold }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-fault",
+      "name": "Fault Output",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        880,
+        240
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "fl-s",
+              "name": "status",
+              "type": "string",
+              "value": "FAULT_SENSOR"
+            },
+            {
+              "id": "fl-f",
+              "name": "fanOn",
+              "type": "boolean",
+              "value": true
+            },
+            {
+              "id": "fl-t",
+              "name": "tick",
+              "type": "number",
+              "value": "={{ $json.tick }}"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Init Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init Run": {
+      "main": [
+        [
+          {
+            "node": "Simulate Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simulate Run": {
+      "main": [
+        [
+          {
+            "node": "Sensor Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sensor Valid?": {
+      "main": [
+        [
+          {
+            "node": "Temp >= 60?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fault Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Temp >= 60?": {
+      "main": [
+        [
+          {
+            "node": "Confirm Fan ON",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Temp <= 50?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Temp <= 50?": {
+      "main": [
+        [
+          {
+            "node": "Confirm Fan OFF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Confirm Fan HOLD",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirm Fan ON": {
+      "main": [
+        [
+          {
+            "node": "Output State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirm Fan OFF": {
+      "main": [
+        [
+          {
+            "node": "Output State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirm Fan HOLD": {
+      "main": [
+        [
+          {
+            "node": "Output State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "microtemp000000000000000001"
+}
